@@ -1,0 +1,237 @@
+pipeline:
+  name: WF Showcase Consumer Payments
+  identifier: wf_showcase_consumer_payments
+  projectIdentifier: CSETest1
+  orgIdentifier: nglabs
+  description: 'Live demo: GHA Migrator output for ank1064/wf-enterprise-gha-demo
+    java-payments-ci.yml (INLINE)'
+  properties:
+    ci:
+      codebase:
+        connectorRef: <+input>
+        repoName: <+input>
+        build: <+input>
+  variables:
+  - name: MAVEN_OPTS
+    type: String
+    value: -Xmx2g
+  - name: IMAGE_NAME
+    type: String
+    value: 123456789012.dkr.ecr.us-east-1.amazonaws.com/consumer-payments
+  - name: SONAR_HOST
+    type: String
+    value: https://sonarqube.internal.example.com
+  - name: skip_scan
+    type: String
+    value: 'false'
+    description: Skip SAST/SCA (emergency hotfix only)
+  - name: AWS_CONNECTOR_REF
+    type: String
+    value: <+input>
+    description: AWS connector with OIDC for ECR access
+  stages:
+  - stage:
+      name: Build Test Quality
+      identifier: quality
+      type: CI
+      spec:
+        cloneCodebase: true
+        caching:
+          enabled: true
+          paths:
+          - /root/.m2/repository
+        infrastructure:
+          type: KubernetesDirect
+          spec:
+            connectorRef: <+input>
+            namespace: <+input>
+            automountServiceAccountToken: true
+            nodeSelector: {}
+            os: Linux
+        execution:
+          steps:
+          - step:
+              type: Run
+              name: Maven Verify
+              identifier: maven_verify
+              spec:
+                connectorRef: <+input>
+                image: maven:3.9-eclipse-temurin-17
+                shell: Bash
+                command: 'mvn -B -ntp verify -DskipITs=false
+
+                  '
+                envVariables:
+                  MAVEN_OPTS: <+pipeline.variables.MAVEN_OPTS>
+                reports:
+                  type: JUnit
+                  spec:
+                    paths:
+                    - '**/target/surefire-reports/*.xml'
+              failureStrategies:
+              - onFailure:
+                  errors:
+                  - AllErrors
+                  action:
+                    type: Ignore
+          - step:
+              type: Run
+              name: SonarQube Scan
+              identifier: sonarqube_scan
+              spec:
+                connectorRef: <+input>
+                image: maven:3.9-eclipse-temurin-17
+                shell: Bash
+                command: "mvn -B -ntp sonar:sonar \\\n  -Dsonar.host.url=<+pipeline.variables.SONAR_HOST>\
+                  \ \\\n  -Dsonar.projectKey=consumer-payments\n"
+                envVariables:
+                  MAVEN_OPTS: <+pipeline.variables.MAVEN_OPTS>
+                  SONAR_TOKEN: <+secrets.getValue("SONAR_TOKEN")>
+              when:
+                stageStatus: Success
+                condition: <+pipeline.variables.skip_scan> != "true"
+          - step:
+              type: Run
+              name: Checkmarx SAST
+              identifier: checkmarx_sast
+              spec:
+                connectorRef: <+input>
+                image: checkmarx/cx-flow:latest
+                shell: Bash
+                command: "java -jar /app/cx-flow.jar \\\n  --scan \\\n  --app=consumer-payments\
+                  \ \\\n  --cx-team=\"CxServer/SP/Banking/Payments\" \\\n  --cx-project=consumer-payments\n"
+                envVariables:
+                  CHECKMARX_URL: <+secrets.getValue("CX_URL")>
+                  CHECKMARX_USERNAME: <+secrets.getValue("CX_USER")>
+                  CHECKMARX_PASSWORD: <+secrets.getValue("CX_PASSWORD")>
+              when:
+                stageStatus: Success
+                condition: <+pipeline.variables.skip_scan> != "true"
+          - step:
+              type: Run
+              name: Dependency Review
+              identifier: dependency_review
+              spec:
+                connectorRef: <+input>
+                image: maven:3.9-eclipse-temurin-17
+                shell: Bash
+                command: 'mvn -B -ntp dependency:tree
+
+                  mvn -B -ntp org.owasp:dependency-check-maven:check
+
+                  '
+              when:
+                stageStatus: Success
+                condition: <+codebase.build.type> == "PR"
+          - step:
+              name: Publish JUnit
+              identifier: publish_junit
+              type: S3Upload
+              spec:
+                sourcePath: '**/target/surefire-reports/*.xml'
+                connectorRef: <+input>
+                bucket: junit-reports
+                region: <+input>
+              description: From GHA `actions/upload-artifact@v4` via action recipe
+                `S3Upload`.
+        type: CI
+      timeout: 45m
+      failureStrategies:
+      - onFailure:
+          errors:
+          - AllErrors
+          action:
+            type: MarkAsFailure
+  - stage:
+      name: Container Publish
+      identifier: publish
+      type: CI
+      spec:
+        cloneCodebase: true
+        infrastructure:
+          type: KubernetesDirect
+          spec:
+            connectorRef: <+input>
+            namespace: <+input>
+            automountServiceAccountToken: true
+            nodeSelector: {}
+            os: Linux
+        execution:
+          steps:
+          - step:
+              name: Build and Push
+              identifier: build_and_push
+              type: BuildAndPushDockerRegistry
+              spec:
+                connectorRef: <+pipeline.variables.AWS_CONNECTOR_REF>
+                repo: <+input>
+                dockerfile: ./Dockerfile
+                tags:
+                - '<+pipeline.variables.IMAGE_NAME>:<+codebase.commitSha>
+
+                  <+pipeline.variables.IMAGE_NAME>:main
+
+                  '
+              description: From GHA `docker/build-push-action@v5` via action recipe
+                `BuildAndPushDockerRegistry`.
+          - step:
+              type: AquaTrivy
+              name: Trivy Image Scan
+              identifier: trivy_scan
+              spec:
+                mode: orchestration
+                config: default
+                target:
+                  type: container
+                  detection: manual
+                  name: consumer-payments
+                  variant: <+codebase.branch>
+                advanced:
+                  log:
+                    level: info
+                  fail_on_severity: high
+                privileged: true
+                image:
+                  type: docker_v2
+                  name: <+pipeline.variables.IMAGE_NAME>
+                  tag: <+codebase.commitSha>
+                  connectorRef: <+pipeline.variables.AWS_CONNECTOR_REF>
+          - step:
+              type: Run
+              name: Generate SBOM
+              identifier: generate_sbom
+              spec:
+                connectorRef: <+input>
+                image: anchore/syft:latest
+                shell: Bash
+                command: 'syft <+pipeline.variables.IMAGE_NAME>:<+codebase.commitSha>
+                  -o spdx-json > sbom.json
+
+                  '
+          - step:
+              name: Login to Amazon ECR
+              identifier: login_to_amazon_ecr
+              type: BuildAndPushECR
+              spec:
+                connectorRef: <+input>
+                region: <+input>
+                account: <+input>
+                imageName: <+input>
+                tags:
+                - <+input>
+              description: From GHA `aws-actions/amazon-ecr-login@v2` via action recipe
+                `BuildAndPushECR`.
+        type: CI
+      when:
+        pipelineStatus: Success
+        condition: <+codebase.build.type> != "PR"
+      failureStrategies:
+      - onFailure:
+          errors:
+          - AllErrors
+          action:
+            type: MarkAsFailure
+  tags:
+    wf_demo: 'true'
+    source: gha_migrator
+    store: inline
