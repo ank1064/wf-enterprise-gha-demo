@@ -1,0 +1,94 @@
+name: Reusable Enterprise CI
+on:
+  workflow_call:
+    inputs:
+      language:
+        required: true
+        type: string
+      working_directory:
+        required: false
+        type: string
+        default: .
+      image_name:
+        required: true
+        type: string
+    secrets:
+      SONAR_TOKEN:
+        required: true
+      SNYK_TOKEN:
+        required: true
+    outputs:
+      image_tag:
+        description: Published image tag
+        value: ${{ jobs.publish.outputs.image_tag }}
+
+jobs:
+  ci:
+    name: Build Test Scan
+    runs-on: [self-hosted, linux, x64, enterprise]
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Setup Java
+        if: inputs.language == 'java'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+      - name: Maven verify
+        if: inputs.language == 'java'
+        run: mvn -B -ntp verify
+      - name: Setup Node
+        if: inputs.language == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: npm ci test build
+        if: inputs.language == 'node'
+        run: |
+          npm ci
+          npm test -- --ci
+          npm run build
+      - name: Enterprise security scan
+        uses: ./.github/actions/enterprise-security-scan
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          language: ${{ inputs.language }}
+          fail_on: high
+      - name: SonarQube
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          if [ "${{ inputs.language }}" = "java" ]; then
+            mvn -B -ntp sonar:sonar
+          else
+            npx sonar-scanner
+          fi
+
+  publish:
+    name: Publish image
+    needs: ci
+    if: github.event_name != 'pull_request'
+    runs-on: [self-hosted, linux, x64, enterprise]
+    outputs:
+      image_tag: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/gha-enterprise-ecr
+          aws-region: us-east-1
+      - uses: aws-actions/amazon-ecr-login@v2
+      - uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.working_directory }}
+          push: true
+          tags: ${{ inputs.image_name }}:${{ github.sha }}

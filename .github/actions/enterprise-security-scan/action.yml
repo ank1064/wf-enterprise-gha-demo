@@ -1,0 +1,42 @@
+name: Enterprise Security Scan
+description: Org-standard SAST, SCA, secrets, and container FS scan for regulated CI
+inputs:
+  language:
+    description: Primary language (java, node, python)
+    required: true
+  fail_on:
+    description: Severity floor
+    required: false
+    default: high
+outputs:
+  scan_status:
+    description: pass or fail
+    value: ${{ steps.summary.outputs.status }}
+runs:
+  using: composite
+  steps:
+    - name: Gitleaks
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+
+    - name: Trivy filesystem
+      uses: aquasecurity/trivy-action@0.28.0
+      with:
+        scan-type: fs
+        scan-ref: .
+        severity: CRITICAL,HIGH
+        exit-code: "1"
+
+    - name: Snyk test
+      uses: snyk/actions/node@master
+      env:
+        SNYK_TOKEN: ${{ env.SNYK_TOKEN }}
+      with:
+        args: --severity-threshold=${{ inputs.fail_on }}
+        command: test
+
+    - name: Summarize
+      id: summary
+      shell: bash
+      run: echo "status=pass" >> "$GITHUB_OUTPUT"

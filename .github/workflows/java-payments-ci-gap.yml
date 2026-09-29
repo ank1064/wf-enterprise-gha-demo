@@ -1,0 +1,86 @@
+# Same Consumer Payments path, plus intentional extras beyond wf_java_payments_ci
+# so GHA Mapper gap-fill is required during the live demo.
+name: Consumer Payments Java CI (Gap)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/java-payments-ci-gap.yml"
+
+env:
+  JAVA_VERSION: "17"
+  MAVEN_OPTS: "-Xmx2g"
+  IMAGE_NAME: 123456789012.dkr.ecr.us-east-1.amazonaws.com/consumer-payments
+  SONAR_HOST: https://sonarqube.internal.example.com
+
+permissions:
+  contents: read
+  id-token: write
+  security-events: write
+  packages: write
+
+jobs:
+  quality:
+    name: Build Test Quality Gap
+    runs-on: [self-hosted, linux, x64, enterprise]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+      - name: Maven verify
+        run: mvn -B -ntp verify -DskipITs=false
+      - name: Publish JUnit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-reports
+          path: "**/target/surefire-reports/*.xml"
+      - name: SonarQube scan
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: mvn -B -ntp sonar:sonar -Dsonar.host.url=${{ env.SONAR_HOST }} -Dsonar.projectKey=consumer-payments
+      - name: Checkmarx SAST
+        uses: checkmarx-ts/checkmarx-cxflow-github-action@v1.6
+        with:
+          project: consumer-payments
+          team: CxServer/SP/Banking/Payments
+          checkmarx_url: ${{ secrets.CX_URL }}
+          checkmarx_username: ${{ secrets.CX_USER }}
+          checkmarx_password: ${{ secrets.CX_PASSWORD }}
+      - name: OWASP Dependency Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: consumer-payments
+          path: .
+          format: HTML
+      - name: CycloneDX SBOM (Maven)
+        run: mvn -B org.cyclonedx:cyclonedx-maven-plugin:makeAggregateBom
+      - name: Slack notify quality gate
+        if: failure()
+        run: echo "Would notify #payments-ci on quality failure"
+  publish:
+    name: Container Publish
+    needs: quality
+    if: github.event_name != 'pull_request'
+    runs-on: [self-hosted, linux, x64, enterprise]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789012:role/gha-payments-ecr
+          aws-region: us-east-1
+      - uses: aws-actions/amazon-ecr-login@v2
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:${{ github.sha }}
