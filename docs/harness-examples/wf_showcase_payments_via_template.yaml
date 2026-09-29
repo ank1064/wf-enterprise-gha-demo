@@ -1,13 +1,14 @@
 pipeline:
-  name: WF Showcase Payments Remote Vars
-  identifier: wf_showcase_payments_remote_vars
+  name: WF Showcase Payments via Template
+  identifier: wf_showcase_payments_via_template
   projectIdentifier: CSETest1
   orgIdentifier: nglabs
-  description: Remote Git-backed pipeline with variable mapping (demo_repo, IMAGE_NAME, skip_scan).
+  description: 'Live demo: GHA Mapper output bound to wf_java_payments_ci (INLINE
+    pipeline + INLINE template ref)'
   tags:
-    wf_demo: "true"
+    wf_demo: 'true'
     source: gha_mapper
-    store: remote
+    store: inline
   template:
     templateRef: wf_java_payments_ci
     versionLabel: v1
@@ -43,6 +44,7 @@ pipeline:
               spec:
                 connectorRef: <+input>
                 namespace: <+input>
+      variables: []
   variables:
   - name: demo_repo
     type: String
@@ -53,9 +55,3 @@ pipeline:
   - name: IMAGE_NAME
     type: String
     value: 123456789012.dkr.ecr.us-east-1.amazonaws.com/consumer-payments
-  - name: skip_scan
-    type: String
-    value: "false"
-  - name: MAVEN_OPTS
-    type: String
-    value: -Xmx2g
